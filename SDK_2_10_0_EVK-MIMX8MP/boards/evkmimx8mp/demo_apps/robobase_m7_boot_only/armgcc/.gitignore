@@ -1,0 +1,11 @@
+CMakeCache.txt
+CMakeFiles/
+Makefile
+build_log.txt
+cmake_install.cmake
+debug/
+release/
+ddr_debug/
+ddr_release/
+flash_debug/
+flash_release/

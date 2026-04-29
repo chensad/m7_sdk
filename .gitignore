@@ -1,0 +1,22 @@
+# Local downloads and toolchains. Keep these outside the M7 source dependency repo.
+.venv-west/
+mcuxpresso-sdk/
+gcc-arm-none-eabi-*/
+*.tar
+*.tar.gz
+*.tar.bz2
+*.zip
+
+# MCUXpresso armgcc generated files.
+**/armgcc/debug/
+**/armgcc/release/
+**/armgcc/ddr_debug/
+**/armgcc/ddr_release/
+**/armgcc/flash_debug/
+**/armgcc/flash_release/
+**/armgcc/CMakeFiles/
+**/armgcc/CMakeCache.txt
+**/armgcc/Makefile
+**/armgcc/cmake_install.cmake
+**/armgcc/build_log.txt
+**/armgcc/output.map
