@@ -58,6 +58,18 @@ This RPMsg firmware is intentionally smaller than the NXP FreeRTOS examples:
 - it uses the RPMsg-Lite bare-metal environment
 - it uses static RPMsg-Lite contexts, not FreeRTOS queues
 - it only initializes MU and announces `rpmsg-virtual-tty-channel-1`
+- it preserves byte echo mode while also accepting first-version RoboBase
+  safety protocol frames
+
+The shared safety protocol ABI is:
+
+```text
+platform/common/include/robobase/rb_safety_proto.h
+```
+
+Version 0.1 defines Linux-to-M7 `LEASE`, M7-to-Linux `STATUS`, and
+Linux-to-M7 `CLEAR_FAULT` frames. The initial state machine supports `BOOT`,
+`STANDBY`, `ARMED`, `RUNNING`, `SAFE_STOP`, and `FAULT_LATCHED`.
 
 The RPMsg resource table uses the Linux reserved-memory layout:
 
@@ -144,6 +156,19 @@ printf 'robobase-test\n' > "$TTY"
 sleep 1
 kill "$CATPID"
 ```
+
+Safety protocol test with the Linux user-space tool:
+
+```sh
+robobase-rpmsg-test --safety -d /dev/ttyRPMSG30 -n 10
+robobase-rpmsg-test --safety -d /dev/ttyRPMSG30 --upstream-invalid
+robobase-rpmsg-test --safety -d /dev/ttyRPMSG30 --clear-fault 0xffffffff
+```
+
+The v0.1 timeout path is not a final safety watchdog. It is only a bring-up
+approximation based on observed Linux lease timing; the next firmware step is
+to add an M7 timer tick so link-loss can be detected without receiving another
+RPMsg frame.
 
 If `/sys/bus/rpmsg/devices` only contains `rpmsg_ctrl` and `rpmsg_ns`, the
 Linux transport is up but the M7 firmware did not announce the tty data channel.

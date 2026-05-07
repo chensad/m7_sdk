@@ -28,6 +28,7 @@ set(MCUX_SDK_PROJECT_NAME robobase_m7_boot_only.elf)
 set(ROBOBASE_RPMSG_PROJECT_NAME robobase_m7_rpmsg_tty_echo.elf)
 set(OLD_MCUX_SDK_ROOT ${ProjDirPath}/../../../../../)
 set(M7_THIRD_PARTY_ROOT ${ProjDirPath}/../../../../../../)
+set(MYPLATFORM_ROOT ${M7_THIRD_PARTY_ROOT}/../..)
 set(RPMSG_LITE_DIR ${M7_THIRD_PARTY_ROOT}/rpmsg-lite-minimal/rpmsg-lite)
 set(REMOTEPROC_DIR ${M7_THIRD_PARTY_ROOT}/rpmsg-lite-minimal/remoteproc)
 
@@ -97,6 +98,7 @@ target_compile_definitions(${ROBOBASE_RPMSG_PROJECT_NAME} PRIVATE
 
 target_include_directories(${ROBOBASE_RPMSG_PROJECT_NAME} PRIVATE
     ${ProjDirPath}/..
+    ${MYPLATFORM_ROOT}/platform/common/include
     ${OLD_MCUX_SDK_ROOT}/devices/MIMX8ML8
     ${OLD_MCUX_SDK_ROOT}/devices/MIMX8ML8/drivers
     ${OLD_MCUX_SDK_ROOT}/devices/MIMX8ML8/utilities/debug_console_lite
