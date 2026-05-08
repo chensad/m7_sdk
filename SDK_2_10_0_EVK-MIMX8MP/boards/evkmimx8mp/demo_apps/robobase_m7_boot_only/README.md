@@ -165,10 +165,17 @@ robobase-rpmsg-test --safety -d /dev/ttyRPMSG30 --upstream-invalid
 robobase-rpmsg-test --safety -d /dev/ttyRPMSG30 --clear-fault 0xffffffff
 ```
 
-The v0.1 timeout path is not a final safety watchdog. It is only a bring-up
-approximation based on observed Linux lease timing; the next firmware step is
-to add an M7 timer tick so link-loss can be detected without receiving another
-RPMsg frame.
+M7 local watchdog test:
+
+```sh
+robobase-rpmsg-test --safety -d /dev/ttyRPMSG30 --lease-timeout-ms 200 -n 1
+sleep 1
+robobase-rpmsg-test --query-status -d /dev/ttyRPMSG30
+```
+
+The query uses a `HELLO` frame, so it reads M7 `STATUS` without refreshing the
+Linux lease. After the timeout expires, expect `state=SAFE_STOP`, `motion=0`,
+and `fault=0x00000004`.
 
 If `/sys/bus/rpmsg/devices` only contains `rpmsg_ctrl` and `rpmsg_ns`, the
 Linux transport is up but the M7 firmware did not announce the tty data channel.

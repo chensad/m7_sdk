@@ -14,6 +14,7 @@
 #include "rpmsg_lite.h"
 #include "rpmsg_ns.h"
 #include "rpmsg_platform.h"
+#include "system_MIMX8ML8_cm7.h"
 
 #define ROBOBASE_RPMSG_SHMEM_BASE ((void *)0x55000000U)
 #define ROBOBASE_RPMSG_LOCAL_EPT_ADDR (30U)
@@ -34,8 +35,15 @@ static uint32_t s_heartbeat_counter;
 static uint32_t s_safety_loop_counter;
 static uint32_t s_last_linux_seq;
 static uint32_t s_last_linux_uptime_ms;
+static uint32_t s_last_lease_m7_ms;
 static uint32_t s_last_lease_age_ms;
+static uint32_t s_current_lease_timeout_ms;
+static volatile uint32_t s_m7_uptime_ms;
 static uint8_t s_seen_lease;
+static uint8_t s_latest_linux_alive;
+static uint8_t s_latest_upstream_lease_valid;
+static uint8_t s_latest_driver_ok = 1U;
+static uint8_t s_latest_power_ok = 1U;
 static uint8_t s_state = RB_SAFE_BOOT;
 static uint8_t s_motion_enable;
 static uint32_t s_fault_bits;
@@ -47,6 +55,11 @@ static uint32_t s_latched_fault_bits;
  */
 static uint8_t s_estop_nc_closed = 1U;
 static uint8_t s_bumper_nc_closed = 1U;
+
+void SysTick_Handler(void)
+{
+    s_m7_uptime_ms++;
+}
 
 static void robobase_idle_forever(void)
 {
@@ -63,6 +76,20 @@ static void robobase_delay_for_linux_ns(void)
     while (loops-- != 0U)
     {
         __NOP();
+    }
+}
+
+static void robobase_safe_init_timer(void)
+{
+    SystemCoreClockUpdate();
+    if (SystemCoreClock == 0U)
+    {
+        SystemCoreClock = DEFAULT_SYSTEM_CLOCK;
+    }
+
+    if (SysTick_Config(SystemCoreClock / 1000U) != 0U)
+    {
+        robobase_idle_forever();
     }
 }
 
@@ -153,6 +180,26 @@ static void robobase_safe_update_motion(uint8_t linux_alive, uint8_t upstream_le
     }
 }
 
+static void robobase_safe_check_watchdog(void)
+{
+    uint32_t age_ms;
+
+    if ((s_seen_lease == 0U) || (s_current_lease_timeout_ms == 0U))
+    {
+        return;
+    }
+
+    age_ms = s_m7_uptime_ms - s_last_lease_m7_ms;
+    s_last_lease_age_ms = age_ms;
+    if (age_ms <= s_current_lease_timeout_ms)
+    {
+        return;
+    }
+
+    s_latest_linux_alive = 0U;
+    robobase_safe_update_motion(0U, s_latest_upstream_lease_valid, s_latest_driver_ok, s_latest_power_ok);
+}
+
 static uint32_t robobase_safe_clear_faults(uint32_t clear_mask)
 {
     uint32_t clearable = clear_mask;
@@ -168,7 +215,9 @@ static uint32_t robobase_safe_clear_faults(uint32_t clear_mask)
     }
 
     s_latched_fault_bits &= ~clearable;
-    robobase_safe_update_motion(1U, 0U, 1U, 1U);
+    robobase_safe_check_watchdog();
+    robobase_safe_update_motion(s_latest_linux_alive, s_latest_upstream_lease_valid, s_latest_driver_ok,
+                                s_latest_power_ok);
     return clearable;
 }
 
@@ -186,7 +235,7 @@ static uint32_t robobase_safe_build_status(uint32_t seq, uint8_t *buf, uint32_t 
     rb_safe_hdr_init(hdr, RB_SAFE_MSG_STATUS, seq, payload_len);
 
     s_heartbeat_counter++;
-    status->m7_uptime_ms = s_safety_loop_counter;
+    status->m7_uptime_ms = s_m7_uptime_ms;
     status->heartbeat_counter = s_heartbeat_counter;
     status->state = s_state;
     status->motion_enable = s_motion_enable;
@@ -224,6 +273,17 @@ static uint32_t robobase_safe_handle_frame(const uint8_t *rx, uint32_t rx_len, u
         return robobase_safe_build_status(hdr->seq, tx, tx_size);
     }
 
+    if (hdr->msg_type == RB_SAFE_MSG_HELLO)
+    {
+        if (hdr->payload_len != 0U)
+        {
+            s_fault_bits |= RB_FAULT_PROTOCOL_ERROR;
+        }
+        s_last_linux_seq = hdr->seq;
+        robobase_safe_check_watchdog();
+        return robobase_safe_build_status(hdr->seq, tx, tx_size);
+    }
+
     if (hdr->msg_type == RB_SAFE_MSG_LEASE)
     {
         const struct rb_safe_lease_msg *lease = (const struct rb_safe_lease_msg *)payload;
@@ -234,37 +294,22 @@ static uint32_t robobase_safe_handle_frame(const uint8_t *rx, uint32_t rx_len, u
             return robobase_safe_build_status(hdr->seq, tx, tx_size);
         }
 
-        if (s_seen_lease != 0U)
+        if (s_seen_lease == 0U)
         {
-            s_last_lease_age_ms = lease->linux_uptime_ms - s_last_linux_uptime_ms;
-            if ((lease->lease_timeout_ms != 0U) && (s_last_lease_age_ms > lease->lease_timeout_ms))
-            {
-                s_fault_bits |= RB_FAULT_LINUX_TIMEOUT;
-            }
-        }
-        else
-        {
-            s_last_lease_age_ms = 0U;
             s_seen_lease = 1U;
         }
 
         s_last_linux_seq = hdr->seq;
         s_last_linux_uptime_ms = lease->linux_uptime_ms;
-        robobase_safe_update_motion(lease->linux_alive, lease->upstream_lease_valid, lease->driver_ok,
-                                    lease->power_ok);
-        if ((lease->lease_timeout_ms != 0U) && (s_last_lease_age_ms > lease->lease_timeout_ms))
-        {
-            s_fault_bits |= RB_FAULT_LINUX_TIMEOUT;
-            s_motion_enable = 0U;
-            if (s_latched_fault_bits != 0U)
-            {
-                s_state = RB_SAFE_FAULT_LATCHED;
-            }
-            else
-            {
-                s_state = RB_SAFE_STOP;
-            }
-        }
+        s_last_lease_m7_ms = s_m7_uptime_ms;
+        s_last_lease_age_ms = 0U;
+        s_current_lease_timeout_ms = lease->lease_timeout_ms;
+        s_latest_linux_alive = lease->linux_alive;
+        s_latest_upstream_lease_valid = lease->upstream_lease_valid;
+        s_latest_driver_ok = lease->driver_ok;
+        s_latest_power_ok = lease->power_ok;
+        robobase_safe_update_motion(s_latest_linux_alive, s_latest_upstream_lease_valid, s_latest_driver_ok,
+                                    s_latest_power_ok);
         return robobase_safe_build_status(hdr->seq, tx, tx_size);
     }
 
@@ -295,6 +340,8 @@ int main(void)
 {
     struct rpmsg_lite_instance *rpmsg;
     struct rpmsg_lite_endpoint *ept;
+
+    robobase_safe_init_timer();
 
     rpmsg = rpmsg_lite_remote_init(ROBOBASE_RPMSG_SHMEM_BASE, RL_PLATFORM_IMX8MP_M7_USER_LINK_ID, RL_NO_FLAGS,
                                    &s_rpmsg_context);
@@ -327,6 +374,7 @@ int main(void)
         uint32_t dst;
 
         s_safety_loop_counter++;
+        robobase_safe_check_watchdog();
 
         __disable_irq();
         if (s_rx_pending == 0U)
