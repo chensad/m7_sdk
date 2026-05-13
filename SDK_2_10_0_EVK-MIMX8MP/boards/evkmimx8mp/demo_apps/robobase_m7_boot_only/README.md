@@ -60,6 +60,13 @@ This RPMsg firmware is intentionally smaller than the NXP FreeRTOS examples:
 - it only initializes MU and announces `rpmsg-virtual-tty-channel-1`
 - it preserves byte echo mode while also accepting first-version RoboBase
   safety protocol frames
+- the RPMsg transport, safety state machine, and safety input sampling are kept
+  in separate source files so the first GPIO backend can be added without
+  rewriting the protocol path
+- GPIO sampling and Linux lease watchdog checks run from a fixed 1 ms safety
+  tick driven by SysTick pending work, not from the RPMsg receive cadence
+- RPMsg handlers update command/lease inputs and return the latest safety
+  snapshot; they do not own the GPIO polling loop
 
 The shared safety protocol ABI is:
 
@@ -70,6 +77,45 @@ platform/common/include/robobase/rb_safety_proto.h
 Version 0.1 defines Linux-to-M7 `LEASE`, M7-to-Linux `STATUS`, and
 Linux-to-M7 `CLEAR_FAULT` frames. The initial state machine supports `BOOT`,
 `STANDBY`, `ARMED`, `RUNNING`, `SAFE_STOP`, and `FAULT_LATCHED`.
+
+Safety input sampling is implemented in:
+
+```text
+robobase_safety_inputs.c
+```
+
+M7 configures both pads as real GPIO5 inputs and samples the GPIO pad status.
+For no-device bench testing, the Linux test tool can send a debug frame that
+changes each pad's internal pull-up/pull-down bias. This gives a real GPIO
+sample without attaching the mushroom switch or bumper yet:
+
+```sh
+robobase-rpmsg-test --estop-gpio-high --safety -d /dev/ttyRPMSG30 -n 1
+robobase-rpmsg-test --estop-gpio-low --bumper-gpio-low --clear-fault 0xffffffff -d /dev/ttyRPMSG30
+robobase-rpmsg-test --bumper-gpio-high --safety -d /dev/ttyRPMSG30 -n 1
+robobase-rpmsg-test --bumper-gpio-low --estop-gpio-low --clear-fault 0xffffffff -d /dev/ttyRPMSG30
+```
+
+The debug levels follow the planned NC wiring:
+
+```text
+GPIO low  = pull-down, NC contact closed to GND = safe
+GPIO high = pull-up, NC contact open/fault
+```
+
+The firmware defaults both inputs to internal pull-up. With no switches attached,
+the first status query should therefore report both inputs open/fault until the
+test tool biases them low.
+
+The intended first hardware mapping is:
+
+```text
+E-stop NC auxiliary contact: J25 pin 23, ECSPI2_SCLK_3V3, GPIO5_IO10
+Bumper/microswitch NC:       J25 pin 21, ECSPI2_MISO_3V3, GPIO5_IO12
+```
+
+The normalized safety input value remains `1 = NC closed, safe` and
+`0 = NC open, fault`.
 
 The RPMsg resource table uses the Linux reserved-memory layout:
 

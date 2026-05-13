@@ -10,7 +10,7 @@
 #include <string.h>
 
 #include "fsl_device_registers.h"
-#include "robobase/rb_safety_proto.h"
+#include "robobase_safe_app.h"
 #include "rpmsg_lite.h"
 #include "rpmsg_ns.h"
 #include "rpmsg_platform.h"
@@ -29,36 +29,12 @@ static volatile uint32_t s_rx_pending;
 static volatile uint32_t s_rx_src;
 static volatile uint32_t s_rx_len;
 static uint8_t s_rx_buf[ROBOBASE_RPMSG_MAX_PAYLOAD];
+static uint8_t s_work_rx_buf[ROBOBASE_RPMSG_MAX_PAYLOAD];
 static uint8_t s_tx_buf[ROBOBASE_RPMSG_MAX_PAYLOAD];
-
-static uint32_t s_heartbeat_counter;
-static uint32_t s_safety_loop_counter;
-static uint32_t s_last_linux_seq;
-static uint32_t s_last_linux_uptime_ms;
-static uint32_t s_last_lease_m7_ms;
-static uint32_t s_last_lease_age_ms;
-static uint32_t s_current_lease_timeout_ms;
-static volatile uint32_t s_m7_uptime_ms;
-static uint8_t s_seen_lease;
-static uint8_t s_latest_linux_alive;
-static uint8_t s_latest_upstream_lease_valid;
-static uint8_t s_latest_driver_ok = 1U;
-static uint8_t s_latest_power_ok = 1U;
-static uint8_t s_state = RB_SAFE_BOOT;
-static uint8_t s_motion_enable;
-static uint32_t s_fault_bits;
-static uint32_t s_latched_fault_bits;
-
-/*
- * v0.1 uses simulated safe inputs until real GPIO sampling is wired in.
- * Treat NC contacts as closed so software lease behavior can be tested first.
- */
-static uint8_t s_estop_nc_closed = 1U;
-static uint8_t s_bumper_nc_closed = 1U;
 
 void SysTick_Handler(void)
 {
-    s_m7_uptime_ms++;
+    robobase_safe_tick_1ms();
 }
 
 static void robobase_idle_forever(void)
@@ -121,226 +97,12 @@ static int32_t robobase_rpmsg_rx_cb(void *payload, uint32_t payload_len, uint32_
     return RL_RELEASE;
 }
 
-static void robobase_safe_update_motion(uint8_t linux_alive, uint8_t upstream_lease_valid, uint8_t driver_ok,
-                                        uint8_t power_ok)
-{
-    s_fault_bits = 0U;
-
-    if (s_estop_nc_closed == 0U)
-    {
-        s_fault_bits |= RB_FAULT_ESTOP;
-        s_latched_fault_bits |= RB_FAULT_ESTOP;
-    }
-
-    if (s_bumper_nc_closed == 0U)
-    {
-        s_fault_bits |= RB_FAULT_BUMPER;
-        s_latched_fault_bits |= RB_FAULT_BUMPER;
-    }
-
-    if (linux_alive == 0U)
-    {
-        s_fault_bits |= RB_FAULT_LINUX_TIMEOUT;
-    }
-
-    if (upstream_lease_valid == 0U)
-    {
-        s_fault_bits |= RB_FAULT_UPSTREAM_TIMEOUT;
-    }
-
-    if (driver_ok == 0U)
-    {
-        s_fault_bits |= RB_FAULT_DRIVER_FAULT;
-    }
-
-    if (power_ok == 0U)
-    {
-        s_fault_bits |= RB_FAULT_POWER_FAULT;
-    }
-
-    s_motion_enable = (uint8_t)((s_estop_nc_closed != 0U) && (s_bumper_nc_closed != 0U) &&
-                                (s_latched_fault_bits == 0U) && (linux_alive != 0U) &&
-                                (upstream_lease_valid != 0U) && (driver_ok != 0U) && (power_ok != 0U));
-
-    if (s_latched_fault_bits != 0U)
-    {
-        s_state = RB_SAFE_FAULT_LATCHED;
-    }
-    else if (s_motion_enable != 0U)
-    {
-        s_state = RB_SAFE_RUNNING;
-    }
-    else if (s_fault_bits != 0U)
-    {
-        s_state = RB_SAFE_STOP;
-    }
-    else
-    {
-        s_state = RB_SAFE_STANDBY;
-    }
-}
-
-static void robobase_safe_check_watchdog(void)
-{
-    uint32_t age_ms;
-
-    if ((s_seen_lease == 0U) || (s_current_lease_timeout_ms == 0U))
-    {
-        return;
-    }
-
-    age_ms = s_m7_uptime_ms - s_last_lease_m7_ms;
-    s_last_lease_age_ms = age_ms;
-    if (age_ms <= s_current_lease_timeout_ms)
-    {
-        return;
-    }
-
-    s_latest_linux_alive = 0U;
-    robobase_safe_update_motion(0U, s_latest_upstream_lease_valid, s_latest_driver_ok, s_latest_power_ok);
-}
-
-static uint32_t robobase_safe_clear_faults(uint32_t clear_mask)
-{
-    uint32_t clearable = clear_mask;
-
-    if (s_estop_nc_closed == 0U)
-    {
-        clearable &= ~RB_FAULT_ESTOP;
-    }
-
-    if (s_bumper_nc_closed == 0U)
-    {
-        clearable &= ~RB_FAULT_BUMPER;
-    }
-
-    s_latched_fault_bits &= ~clearable;
-    robobase_safe_check_watchdog();
-    robobase_safe_update_motion(s_latest_linux_alive, s_latest_upstream_lease_valid, s_latest_driver_ok,
-                                s_latest_power_ok);
-    return clearable;
-}
-
-static uint32_t robobase_safe_build_status(uint32_t seq, uint8_t *buf, uint32_t buf_size)
-{
-    struct rb_safe_hdr *hdr = (struct rb_safe_hdr *)buf;
-    struct rb_safe_status_msg *status = (struct rb_safe_status_msg *)(buf + sizeof(*hdr));
-    uint16_t payload_len = (uint16_t)sizeof(*status);
-
-    if (buf_size < (sizeof(*hdr) + sizeof(*status)))
-    {
-        return 0U;
-    }
-
-    rb_safe_hdr_init(hdr, RB_SAFE_MSG_STATUS, seq, payload_len);
-
-    s_heartbeat_counter++;
-    status->m7_uptime_ms = s_m7_uptime_ms;
-    status->heartbeat_counter = s_heartbeat_counter;
-    status->state = s_state;
-    status->motion_enable = s_motion_enable;
-    status->estop_nc_closed = s_estop_nc_closed;
-    status->bumper_nc_closed = s_bumper_nc_closed;
-    status->fault_bits = s_fault_bits;
-    status->latched_fault_bits = s_latched_fault_bits;
-    status->last_linux_seq = s_last_linux_seq;
-    status->last_lease_age_ms = s_last_lease_age_ms;
-    status->safety_loop_counter = s_safety_loop_counter;
-    status->reserved = 0U;
-
-    return (uint32_t)(sizeof(*hdr) + sizeof(*status));
-}
-
-static uint32_t robobase_safe_handle_frame(const uint8_t *rx, uint32_t rx_len, uint8_t *tx, uint32_t tx_size)
-{
-    const struct rb_safe_hdr *hdr = (const struct rb_safe_hdr *)rx;
-    const uint8_t *payload = rx + sizeof(*hdr);
-
-    if (rx_len < sizeof(*hdr))
-    {
-        return 0U;
-    }
-
-    if (hdr->magic != RB_SAFE_MAGIC)
-    {
-        return 0U;
-    }
-
-    if ((hdr->ver_major != RB_SAFE_VER_MAJOR) || (hdr->hdr_len != sizeof(*hdr)) ||
-        (hdr->crc32 != RB_SAFE_CRC_DISABLED) || (rx_len != (sizeof(*hdr) + hdr->payload_len)))
-    {
-        s_fault_bits |= RB_FAULT_PROTOCOL_ERROR;
-        return robobase_safe_build_status(hdr->seq, tx, tx_size);
-    }
-
-    if (hdr->msg_type == RB_SAFE_MSG_HELLO)
-    {
-        if (hdr->payload_len != 0U)
-        {
-            s_fault_bits |= RB_FAULT_PROTOCOL_ERROR;
-        }
-        s_last_linux_seq = hdr->seq;
-        robobase_safe_check_watchdog();
-        return robobase_safe_build_status(hdr->seq, tx, tx_size);
-    }
-
-    if (hdr->msg_type == RB_SAFE_MSG_LEASE)
-    {
-        const struct rb_safe_lease_msg *lease = (const struct rb_safe_lease_msg *)payload;
-
-        if (hdr->payload_len != sizeof(*lease))
-        {
-            s_fault_bits |= RB_FAULT_PROTOCOL_ERROR;
-            return robobase_safe_build_status(hdr->seq, tx, tx_size);
-        }
-
-        if (s_seen_lease == 0U)
-        {
-            s_seen_lease = 1U;
-        }
-
-        s_last_linux_seq = hdr->seq;
-        s_last_linux_uptime_ms = lease->linux_uptime_ms;
-        s_last_lease_m7_ms = s_m7_uptime_ms;
-        s_last_lease_age_ms = 0U;
-        s_current_lease_timeout_ms = lease->lease_timeout_ms;
-        s_latest_linux_alive = lease->linux_alive;
-        s_latest_upstream_lease_valid = lease->upstream_lease_valid;
-        s_latest_driver_ok = lease->driver_ok;
-        s_latest_power_ok = lease->power_ok;
-        robobase_safe_update_motion(s_latest_linux_alive, s_latest_upstream_lease_valid, s_latest_driver_ok,
-                                    s_latest_power_ok);
-        return robobase_safe_build_status(hdr->seq, tx, tx_size);
-    }
-
-    if (hdr->msg_type == RB_SAFE_MSG_CLEAR_FAULT)
-    {
-        const struct rb_safe_clear_fault_msg *clear = (const struct rb_safe_clear_fault_msg *)payload;
-
-        if (hdr->payload_len != sizeof(*clear))
-        {
-            s_fault_bits |= RB_FAULT_PROTOCOL_ERROR;
-            return robobase_safe_build_status(hdr->seq, tx, tx_size);
-        }
-
-        if (clear->confirm == RB_SAFE_CLEAR_CONFIRM)
-        {
-            (void)robobase_safe_clear_faults(clear->clear_mask);
-        }
-
-        s_last_linux_seq = hdr->seq;
-        return robobase_safe_build_status(hdr->seq, tx, tx_size);
-    }
-
-    s_fault_bits |= RB_FAULT_PROTOCOL_ERROR;
-    return robobase_safe_build_status(hdr->seq, tx, tx_size);
-}
-
 int main(void)
 {
     struct rpmsg_lite_instance *rpmsg;
     struct rpmsg_lite_endpoint *ept;
 
+    robobase_safe_init();
     robobase_safe_init_timer();
 
     rpmsg = rpmsg_lite_remote_init(ROBOBASE_RPMSG_SHMEM_BASE, RL_PLATFORM_IMX8MP_M7_USER_LINK_ID, RL_NO_FLAGS,
@@ -369,16 +131,24 @@ int main(void)
 
     for (;;)
     {
+        uint8_t did_work = 0U;
         uint32_t rx_len;
         uint32_t tx_len;
         uint32_t dst;
 
-        s_safety_loop_counter++;
-        robobase_safe_check_watchdog();
+        while (robobase_safe_process_pending_tick() != 0U)
+        {
+            did_work = 1U;
+        }
 
         __disable_irq();
         if (s_rx_pending == 0U)
         {
+            if (did_work != 0U)
+            {
+                __enable_irq();
+                continue;
+            }
             __DSB();
             __WFI();
             __enable_irq();
@@ -387,15 +157,17 @@ int main(void)
 
         rx_len = s_rx_len;
         dst = s_rx_src;
-        tx_len = robobase_safe_handle_frame(s_rx_buf, rx_len, s_tx_buf, ROBOBASE_RPMSG_MAX_PAYLOAD);
-        if (tx_len == 0U)
-        {
-            tx_len = rx_len;
-            memcpy(s_tx_buf, s_rx_buf, tx_len);
-        }
+        memcpy(s_work_rx_buf, s_rx_buf, rx_len);
         s_rx_pending = 0U;
         __DMB();
         __enable_irq();
+
+        tx_len = robobase_safe_handle_frame(s_work_rx_buf, rx_len, s_tx_buf, ROBOBASE_RPMSG_MAX_PAYLOAD);
+        if (tx_len == 0U)
+        {
+            tx_len = rx_len;
+            memcpy(s_tx_buf, s_work_rx_buf, tx_len);
+        }
 
         (void)rpmsg_lite_send(rpmsg, ept, dst, (char *)s_tx_buf, tx_len, RL_BLOCK);
     }

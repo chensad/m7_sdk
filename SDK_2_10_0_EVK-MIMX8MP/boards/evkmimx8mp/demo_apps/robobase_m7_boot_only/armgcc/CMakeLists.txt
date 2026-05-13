@@ -77,6 +77,8 @@ ADD_CUSTOM_COMMAND(TARGET ${MCUX_SDK_PROJECT_NAME} POST_BUILD COMMAND ${CMAKE_OB
 
 add_executable(${ROBOBASE_RPMSG_PROJECT_NAME}
 "${ProjDirPath}/../robobase_m7_rpmsg_tty_echo.c"
+"${ProjDirPath}/../robobase_safe_app.c"
+"${ProjDirPath}/../robobase_safety_inputs.c"
 "${ProjDirPath}/../robobase_m7_rsc_table.c"
 "${RPMSG_LITE_DIR}/lib/rpmsg_lite/rpmsg_lite.c"
 "${RPMSG_LITE_DIR}/lib/rpmsg_lite/rpmsg_ns.c"
