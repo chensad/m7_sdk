@@ -1,15 +1,18 @@
 /*
  * Minimal i.MX8MP CM7 RPMsg tty echo firmware for RoboBase.
  *
- * This intentionally avoids BOARD_InitHardware(), debug UART, pinmux, RDC and
+ * This intentionally avoids BOARD_InitHardware(), debug UART, full-board pinmux, RDC and
  * clock-tree setup. Linux remoteproc owns the boot flow; this firmware only
- * initializes the MU-backed RPMsg-Lite transport and announces one tty channel.
+ * initializes the safety GPIOs and MU-backed RPMsg-Lite transport. A minimal
+ * MPU region gives the SoC peripheral window Device memory attributes before
+ * any peripheral access; it does not enable caches or run full board setup.
  */
 
 #include <stdint.h>
 #include <string.h>
 
 #include "fsl_device_registers.h"
+#include "mpu_armv7.h"
 #include "robobase_safe_app.h"
 #include "rpmsg_lite.h"
 #include "rpmsg_ns.h"
@@ -43,6 +46,38 @@ static void robobase_idle_forever(void)
     {
         __WFI();
     }
+}
+
+/*
+ * The Cortex-M7 default map treats 0x30000000 as Normal memory. MMIO must
+ * instead be Device memory so peripheral transactions cannot be merged like
+ * RAM stores. Without this, GPIO/IOMUX writes were observed to disturb adjacent
+ * registers on MYD-JX8MP, losing safety_allow's mux and output direction.
+ *
+ * Reserve the highest implemented MPU region for 0x30000000..0x30ffffff.
+ * This standalone firmware has no other MPU region owner. Revisit that
+ * reservation if another MPU setup is introduced. TCM, code and RPMsg shared
+ * memory retain their existing attributes; cache state is unchanged.
+ */
+static int robobase_init_mmio_memory(void)
+{
+    uint32_t saved_primask = __get_PRIMASK();
+    uint32_t region_count = (MPU->TYPE & MPU_TYPE_DREGION_Msk) >> MPU_TYPE_DREGION_Pos;
+    uint32_t saved_ctrl = MPU->CTRL;
+
+    if (region_count == 0U)
+    {
+        return 0;
+    }
+
+    __disable_irq();
+    __DSB();
+    ARM_MPU_Disable();
+    ARM_MPU_SetRegionEx(region_count - 1U, 0x30000000U,
+                       ARM_MPU_RASR(1U, ARM_MPU_AP_FULL, 0U, 1U, 0U, 1U, 0U, ARM_MPU_REGION_SIZE_16MB));
+    ARM_MPU_Enable(saved_ctrl | MPU_CTRL_PRIVDEFENA_Msk | MPU_CTRL_HFNMIENA_Msk);
+    __set_PRIMASK(saved_primask);
+    return 1;
 }
 
 static void robobase_delay_for_linux_ns(void)
@@ -102,6 +137,10 @@ int main(void)
     struct rpmsg_lite_instance *rpmsg;
     struct rpmsg_lite_endpoint *ept;
 
+    if (robobase_init_mmio_memory() == 0)
+    {
+        robobase_idle_forever();
+    }
     robobase_safe_init();
     robobase_safe_init_timer();
 

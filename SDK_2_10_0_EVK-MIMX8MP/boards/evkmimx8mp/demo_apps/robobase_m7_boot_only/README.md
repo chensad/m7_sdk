@@ -84,6 +84,12 @@ Safety input sampling is implemented in:
 robobase_safety_inputs.c
 ```
 
+The M7 software safety authorization output is implemented in:
+
+```text
+robobase_safety_outputs.c
+```
+
 M7 configures both pads as real GPIO5 inputs and samples the GPIO pad status.
 For no-device bench testing, the Linux test tool can send a debug frame that
 changes each pad's internal pull-up/pull-down bias. This gives a real GPIO
@@ -112,10 +118,15 @@ The intended first hardware mapping is:
 ```text
 E-stop NC auxiliary contact: J25 pin 23, ECSPI2_SCLK_3V3, GPIO5_IO10
 Bumper/microswitch NC:       J25 pin 21, ECSPI2_MISO_3V3, GPIO5_IO12
+M7 safety_allow output:      J25 pin 19, ECSPI2_MOSI_3V3, GPIO5_IO11
 ```
 
 The normalized safety input value remains `1 = NC closed, safe` and
 `0 = NC open, fault`.
+The `safety_allow` output is active high and defaults low. It is intended to
+drive one input of the external AND gate; the other input should come from the
+hardwired E-stop/bumper NC safety chain. The AND output then drives the
+BTS7960 `R_EN`/`L_EN` enable node.
 
 The RPMsg resource table uses the Linux reserved-memory layout:
 
@@ -232,3 +243,17 @@ cat /sys/class/remoteproc/remoteproc0/state
 dmesg | grep -Ei 'remoteproc|virtio_rpmsg|rpmsg|ttyRPMSG|imx-rproc' | tail -200
 find /sys/bus/rpmsg -maxdepth 3 -type f -o -type l
 ```
+# 2026-09-19: GPIO MMIO memory attributes
+
+The RPMsg safety firmware now configures `0x30000000..0x30ffffff` as
+Device/shareable/execute-never memory before safety GPIO initialization.
+The highest implemented MPU region is reserved for this purpose. Other memory
+attributes and cache state are left unchanged; do not overwrite this region
+when adding another MPU configuration.
+
+Without this setup, board diagnostics observed writes disturbing adjacent
+IOMUX/GPIO registers: J25 pin19 stayed high despite `motion=0`. The MPU
+diagnostic candidate passed user-reported switch, latch and lease-timeout
+checks. The formal image still needs deployment and a final board regression.
+See `myplatform/docs/boards/myir_imx8m_plus_m7_gpio19_mpu_debug.md` in the outer
+project for evidence, hashes, deployment and validation steps.

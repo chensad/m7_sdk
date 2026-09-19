@@ -3,6 +3,7 @@
 #include "fsl_device_registers.h"
 #include "robobase/rb_safety_proto.h"
 #include "robobase_safety_inputs.h"
+#include "robobase_safety_outputs.h"
 
 static uint32_t s_heartbeat_counter;
 static uint32_t s_safety_loop_counter;
@@ -78,6 +79,7 @@ static void robobase_safe_update_motion(uint8_t linux_alive, uint8_t upstream_le
     s_motion_enable = (uint8_t)((s_inputs.estop_nc_closed != 0U) && (s_inputs.bumper_nc_closed != 0U) &&
                                 (s_latched_fault_bits == 0U) && (linux_alive != 0U) &&
                                 (upstream_lease_valid != 0U) && (driver_ok != 0U) && (power_ok != 0U));
+    robobase_safety_outputs_set_safety_allow(s_motion_enable);
 
     if (s_latched_fault_bits != 0U)
     {
@@ -118,6 +120,7 @@ static void robobase_safe_check_watchdog(void)
 
 void robobase_safe_init(void)
 {
+    robobase_safety_outputs_init();
     robobase_safety_inputs_init();
     robobase_safe_sample_inputs();
     robobase_safe_update_motion(s_latest_linux_alive, s_latest_upstream_lease_valid, s_latest_driver_ok,
